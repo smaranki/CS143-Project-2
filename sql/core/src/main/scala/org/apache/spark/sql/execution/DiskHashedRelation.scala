@@ -17,9 +17,10 @@
 package org.apache.spark.sql.execution
 
 import java.io._
-import java.nio.file.{Path, StandardOpenOption, Files}
+import java.nio.file.{Files, Path, StandardOpenOption}
 import java.util.{ArrayList => JavaArrayList}
 
+import org.apache.hadoop.hdfs.web.resources.BlockSizeParam
 import org.apache.spark.SparkException
 import org.apache.spark.sql.catalyst.expressions.{Projection, Row}
 import org.apache.spark.sql.execution.CS143Utils._
@@ -52,12 +53,11 @@ protected [sql] final class GeneralDiskHashedRelation(partitions: Array[DiskPart
   extends DiskHashedRelation with Serializable {
 
   override def getIterator() = {
-    /* IMPLEMENT THIS METHOD */
-    null
+    partitions.iterator
   }
 
   override def closeAllPartitions() = {
-    /* IMPLEMENT THIS METHOD */
+    partitions.foreach((_: DiskPartition).closePartition())
   }
 }
 
@@ -79,7 +79,15 @@ private[sql] class DiskPartition (
     * @param row the [[Row]] we are adding
     */
   def insert(row: Row) = {
-    /* IMPLEMENT THIS METHOD */
+    // IMPLEMENT ME
+    if (inputClosed) {
+      throw new SparkException("Partition is closed.")
+    }
+    data.add(row)
+    if (measurePartitionSize() > blockSize) {
+      spillPartitionToDisk()
+      data.clear()
+    }
   }
 
   /**
@@ -122,13 +130,18 @@ private[sql] class DiskPartition (
       var byteArray: Array[Byte] = null
 
       override def next() = {
-        /* IMPLEMENT THIS METHOD */
-        null
+        currentIterator.next()
       }
 
       override def hasNext() = {
-        /* IMPLEMENT THIS METHOD */
-        false
+        var bln = currentIterator.hasNext
+        if (!bln){
+          bln = chunkSizeIterator.hasNext
+          if (bln){
+            fetchNextChunk()
+          }
+        }
+        bln
       }
 
       /**
@@ -138,8 +151,18 @@ private[sql] class DiskPartition (
         * @return true unless the iterator is empty.
         */
       private[this] def fetchNextChunk(): Boolean = {
-        /* IMPLEMENT THIS METHOD */
-        false
+        if (!chunkSizeIterator.hasNext) {
+          return false
+        }
+
+        val nextChunkSize = chunkSizeIterator.next()
+        if (nextChunkSize <= 0) {
+          return false
+        }
+
+        byteArray = CS143Utils.getNextChunkBytes(inStream, nextChunkSize, byteArray)
+        currentIterator = CS143Utils.getListFromBytes(byteArray).iterator.asScala
+        return true
       }
     }
   }
@@ -152,8 +175,13 @@ private[sql] class DiskPartition (
     * also be closed.
     */
   def closeInput() = {
-    /* IMPLEMENT THIS METHOD */
-    inputClosed = true
+    if (data.isEmpty()){
+      inputClosed = true
+    } else {
+      spillPartitionToDisk()
+      data.clear()
+      inputClosed = true
+    }
   }
 
 
@@ -167,6 +195,15 @@ private[sql] class DiskPartition (
 }
 
 private[sql] object DiskHashedRelation {
+
+  def createDiskP(blockSize: Int, size: Int): JavaArrayList[DiskPartition] = {
+    val partList: JavaArrayList[DiskPartition] = new JavaArrayList[DiskPartition]
+    println("Gay")
+    for (a <- 0 to size - 1) {
+      partList.add(new DiskPartition("partition" + a, blockSize))
+    }
+    partList
+  }
 
   /**
     * Given an input iterator, partitions each row into one of a number of [[DiskPartition]]s
@@ -189,7 +226,15 @@ private[sql] object DiskHashedRelation {
               keyGenerator: Projection,
               size: Int = 64,
               blockSize: Int = 64000) = {
-    /* IMPLEMENT THIS METHOD */
-    null
+    val partList: JavaArrayList[DiskPartition] = createDiskP(blockSize, size)
+    input.foreach{(row: Row) => {
+      val rowWKey = keyGenerator(row)
+      val index = rowWKey.hashCode()%size
+      partList.get(index).insert(row)
+    }
+    }
+    val partitions: Array[DiskPartition] = partList.toArray(new Array[DiskPartition](size))
+    partList.toArray(new Array[DiskPartition](size)).foreach((_: DiskPartition).closeInput())
+    new GeneralDiskHashedRelation(partitions)
   }
 }
